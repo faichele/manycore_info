@@ -35,7 +35,7 @@ static inline void free_strbuf(struct _strbuf *str)
 static inline void realloc_strbuf(struct _strbuf *str, size_t nusz, const char* what)
 {
 	if (nusz > str->sz) {
-		REALLOC(str->buf, nusz, what);
+		REALLOC_TYPED(str->buf, char*, nusz, what);
 		str->sz = nusz;
 	}
 }
@@ -121,20 +121,10 @@ static inline size_t bufcpy(struct _strbuf *str, size_t offset, const char *src)
  * is an offset inside the buffer, which will be incremented as needed
  */
 
-const char *sep;
-size_t sepsz;
+static const char *sep;
+static size_t sepsz;
 
-void set_separator(const char* _sep)
-{
-	sep = _sep;
-	sepsz = strlen(sep);
-}
-
-/* Note that no overflow check is done: it is assumed that _strbuf will have enough room */
-void add_separator(struct _strbuf *str, size_t *offset)
-{
-	if (*offset)
-		*offset += bufcpy_len(str, *offset, sep, sepsz);
-}
+void set_separator(const char* _sep);
+void add_separator(struct _strbuf *str, size_t *offset);
 
 #endif

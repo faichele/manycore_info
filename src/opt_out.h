@@ -37,4 +37,17 @@ struct opt_out {
 	cl_bool check_size;
 };
 
+#define INDENT "  "
+#define I0_STR "%-48s  "
+#define I1_STR "  %-46s  "
+#define I2_STR "    %-44s  "
+
+static const char empty_str[] = "";
+static const char spc_str[] = " ";
+static const char times_str[] = "x";
+static const char comma_str[] = ", ";
+static const char vbar_str[] = " | ";
+
+static const char *cur_sfx = empty_str;
+
 #endif

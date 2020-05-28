@@ -10,6 +10,9 @@
  * systems we can just use RTLD_DEFAULT
  */
 #ifdef _MSC_VER
+#if (_MSC_VER >= 1915)
+#define no_init_all deprecated
+#endif
 # include <windows.h>
 # define dlsym GetProcAddress
 # define DL_MODULE GetModuleHandle("OpenCL")
@@ -37,12 +40,18 @@
 #include "info_loc.h"
 #include "info_ret.h"
 #include "opt_out.h"
+#include "cl_functions.h"
 
 #define ARRAY_SIZE(ar) (sizeof(ar)/sizeof(*ar))
 
 #ifndef UNUSED
 #define UNUSED(x) x __attribute__((unused))
 #endif
+
+/* line prefix, used to identify the platform/device for each
+ * device property in RAW output mode */
+char *line_pfx;
+int line_pfx_len;
 
 struct platform_data {
 	char *pname; /* CL_PLATFORM_NAME */
@@ -57,39 +66,7 @@ struct platform_info_checks {
 	cl_bool has_amd_object_metadata;
 };
 
-struct platform_list {
-	/* Number of platforms in the system */
-	cl_uint num_platforms;
-	/* Total number of devices across all platforms */
-	cl_uint ndevs_total;
-	/* Number of devices allocated in all_devs array */
-	cl_uint alloc_devs;
-	/* Highest OpenCL version supported by any platform.
-	 * If the OpenCL library / ICD loader only supports
-	 * a lower version, problems may arise (such as
-	 * API calls causing segfaults or any other unexpected
-	 * behavior
-	 */
-	cl_uint max_plat_version;
-	/* Largest number of devices on any platform */
-	cl_uint max_devs;
-	/* Length of the longest platform sname */
-	cl_int max_sname_len;
-	/* Array of platform IDs */
-	cl_platform_id *platform;
-	/* Array of device IDs (across all platforms) */
-	cl_device_id *all_devs;
-	/* Array of offsets in all_devs where the devices
-	 * of each platform begin */
-	cl_uint *dev_offset;
-	/* Array of clinfo-specific platform data */
-	struct platform_data *pdata;
-	/* Arrau of clinfo-specifici platform checks */
-	struct platform_info_checks *platform_checks;
-};
-
-void
-init_plist(struct platform_list *plist)
+void init_plist(struct platform_list *plist)
 {
 	plist->num_platforms = 0;
 	plist->ndevs_total = 0;
@@ -105,26 +82,25 @@ init_plist(struct platform_list *plist)
 void plist_devs_reserve(struct platform_list *plist, cl_uint amount)
 {
 	if (amount > plist->alloc_devs) {
-		REALLOC(plist->all_devs, amount, "all devices");
+		REALLOC_TYPED(plist->all_devs, cl_device_id*, amount, "all devices");
 		plist->alloc_devs = amount;
 	}
 }
 
 
-void
-alloc_plist(struct platform_list *plist)
+void alloc_plist(struct platform_list *plist)
 {
-	ALLOC(plist->platform, plist->num_platforms, "platform IDs");
-	ALLOC(plist->dev_offset, plist->num_platforms, "platform device list offset");
+	ALLOC_TYPED(plist->platform, cl_platform_id*, plist->num_platforms, "platform IDs");
+	ALLOC_TYPED(plist->dev_offset, cl_uint*, plist->num_platforms, "platform device list offset");
 	/* The actual sizing for this will change as we gather platform info,
 	 * but assume at least one device per platform
 	 */
 	plist_devs_reserve(plist, plist->num_platforms);
-	ALLOC(plist->pdata, plist->num_platforms, "platform data");
-	ALLOC(plist->platform_checks, plist->num_platforms, "platform checks data");
+	ALLOC_TYPED(plist->pdata, platform_data*, plist->num_platforms, "platform data");
+	ALLOC_TYPED(plist->platform_checks, platform_info_checks*, plist->num_platforms, "platform checks data");
 }
-void
-free_plist(struct platform_list *plist)
+
+void free_plist(struct platform_list *plist)
 {
 	free(plist->platform);
 	free(plist->all_devs);
@@ -145,19 +121,6 @@ get_platform_dev(const struct platform_list *plist, cl_uint p, cl_uint d)
 {
 	return get_platform_devs(plist, p)[d];
 }
-
-/* Data for the OpenCL library / ICD loader */
-struct icdl_data {
-	/* auto-detected OpenCL version support for the ICD loader */
-	cl_uint detected_version;
-	/* OpenCL version support declared by the ICD loader */
-	cl_uint reported_version;
-};
-
-/* line prefix, used to identify the platform/device for each
- * device property in RAW output mode */
-char *line_pfx;
-int line_pfx_len;
 
 #define CHECK_SIZE(ret, loc, val, cmd, ...) do { \
 	/* check if the issue is with param size */ \
@@ -450,20 +413,6 @@ static const cl_interop_name cl_interop_names[] = {
 
 const size_t num_known_interops = ARRAY_SIZE(cl_interop_names);
 
-
-#define INDENT "  "
-#define I0_STR "%-48s  "
-#define I1_STR "  %-46s  "
-#define I2_STR "    %-44s  "
-
-static const char empty_str[] = "";
-static const char spc_str[] = " ";
-static const char times_str[] = "x";
-static const char comma_str[] = ", ";
-static const char vbar_str[] = " | ";
-
-const char *cur_sfx = empty_str;
-
 /* parse a CL_DEVICE_VERSION or CL_PLATFORM_VERSION info to determine the OpenCL version.
  * Returns an unsigned integer in the form major*10 + minor
  */
@@ -588,8 +537,7 @@ struct platform_info_traits pinfo_traits[] = {
  * initializing relevant arrays and optionally showing the collected
  * information
  */
-void
-gatherPlatformInfo(struct platform_list *plist, cl_uint p, const struct opt_out *output)
+void gatherPlatformInfo(struct platform_list *plist, cl_uint p, const struct opt_out *output)
 {
 	cl_int len = 0;
 
@@ -648,7 +596,7 @@ gatherPlatformInfo(struct platform_list *plist, cl_uint p, const struct opt_out 
 		case CL_PLATFORM_NAME:
 			/* Store name for future reference */
 			len = strlen(ret.str.buf);
-			ALLOC(pdata->pname, len+1, "platform name copy");
+			ALLOC_TYPED(pdata->pname, char*, len+1, "platform name copy");
 			/* memcpy instead of strncpy since we already have the len
 			 * and memcpy is possibly more optimized */
 			memcpy(pdata->pname, ret.str.buf, len);
@@ -666,7 +614,7 @@ gatherPlatformInfo(struct platform_list *plist, cl_uint p, const struct opt_out 
 		case CL_PLATFORM_ICD_SUFFIX_KHR:
 			/* Store ICD suffix for future reference */
 			len = strlen(ret.str.buf);
-			ALLOC(pdata->sname, len+1, "platform ICD suffix copy");
+			ALLOC_TYPED(pdata->sname, char*, len+1, "platform ICD suffix copy");
 			/* memcpy instead of strncpy since we already have the len
 			 * and memcpy is possibly more optimized */
 			memcpy(pdata->sname, ret.str.buf, len);
@@ -684,7 +632,7 @@ gatherPlatformInfo(struct platform_list *plist, cl_uint p, const struct opt_out 
 	/* if no CL_PLATFORM_ICD_SUFFIX_KHR, use P### as short/symbolic name */
 	if (!pdata->sname) {
 #define SNAME_MAX 32
-		ALLOC(pdata->sname, SNAME_MAX, "platform symbolic name");
+		ALLOC_TYPED(pdata->sname, char*, SNAME_MAX, "platform symbolic name");
 		snprintf(pdata->sname, SNAME_MAX, "P%" PRIu32 "", p);
 	}
 
@@ -921,7 +869,7 @@ void identify_device_extensions(const char *extensions, struct device_info_check
 	if (has) CPY_EXT(what, #ext); \
 } while(0)
 
-	char *has;
+	const char *has;
 	CHECK_EXT(half, cl_khr_fp16);
 	CHECK_EXT(spir, cl_khr_spir);
 	CHECK_EXT(double, cl_khr_fp64);
@@ -972,6 +920,13 @@ void identify_device_extensions(const char *extensions, struct device_info_check
 		loc, "get %s"); \
 	if (ret->err) { free(val); val = NULL; } \
 
+#define _GET_VAL_VALUES_TYPED(ret, type, loc) \
+	REALLOC_TYPED(val, type, numval, loc->sname); \
+	ret->err = REPORT_ERROR_LOC(ret, \
+		clGetDeviceInfo(loc->dev, loc->param.dev, szval, val, NULL), \
+		loc, "get %s"); \
+	if (ret->err) { free(val); val = NULL; } \
+
 #define _GET_VAL_ARRAY(ret, loc) \
 	ret->err = REPORT_ERROR_LOC(ret, \
 		clGetDeviceInfo(loc->dev, loc->param.dev, 0, NULL, &szval), \
@@ -981,12 +936,25 @@ void identify_device_extensions(const char *extensions, struct device_info_check
 		_GET_VAL_VALUES(ret, loc) \
 	}
 
+#define _GET_VAL_ARRAY_TYPED(ret, type, loc) \
+	ret->err = REPORT_ERROR_LOC(ret, \
+		clGetDeviceInfo(loc->dev, loc->param.dev, 0, NULL, &szval), \
+		loc, "get number of %s"); \
+	numval = szval/sizeof(*val); \
+	if (!ret->err) { \
+		_GET_VAL_VALUES_TYPED(ret, type, loc) \
+	}
+
 #define GET_VAL(ret, loc, field) do { \
 	_GET_VAL(ret, (loc), ret->value.field) \
 } while (0)
 
 #define GET_VAL_ARRAY(ret, loc) do { \
 	_GET_VAL_ARRAY(ret, (loc)) \
+} while (0)
+
+#define GET_VAL_ARRAY_TYPED(ret, type, loc) do { \
+	_GET_VAL_ARRAY_TYPED(ret, type, (loc)) \
 } while (0)
 
 #define DEFINE_DEVINFO_FETCH(type, field) \
@@ -1131,7 +1099,7 @@ device_info_free_mem_amd(struct device_info_ret *ret,
 	// free block. So let's just manually ask for both values
 	size_t *val = NULL;
 	size_t numval = 2, szval = numval*sizeof(*val);
-	_GET_VAL_VALUES(ret, loc);
+	_GET_VAL_VALUES_TYPED(ret, size_t*, loc);
 	if (!ret->err) {
 		size_t cursor = 0;
 		szval = 0;
@@ -1173,7 +1141,7 @@ device_info_szptr_sep(struct device_info_ret *ret, const char *human_sep,
 {
 	size_t *val = NULL;
 	size_t szval = 0, numval = 0;
-	GET_VAL_ARRAY(ret, loc);
+	GET_VAL_ARRAY_TYPED(ret, size_t*, loc);
 	if (!ret->err) {
 		size_t counter = 0;
 		set_separator(output->mode == CLINFO_HUMAN ? human_sep : spc_str);
@@ -1629,7 +1597,7 @@ device_info_partition_types(struct device_info_ret *ret,
 
 	set_separator(output->mode == CLINFO_HUMAN ? comma_str : vbar_str);
 
-	GET_VAL_ARRAY(ret, loc);
+	GET_VAL_ARRAY_TYPED(ret, cl_device_partition_property*, loc);
 
 	szval = 0;
 	if (!ret->err) {
@@ -1678,7 +1646,7 @@ device_info_partition_types_ext(struct device_info_ret *ret,
 
 	set_separator(output->mode == CLINFO_HUMAN ? comma_str : vbar_str);
 
-	GET_VAL_ARRAY(ret, loc);
+	GET_VAL_ARRAY_TYPED(ret, cl_device_partition_property_ext*, loc);
 
 	szval = 0;
 	if (!ret->err) {
@@ -1766,7 +1734,7 @@ device_info_partition_affinities_ext(struct device_info_ret *ret,
 
 	set_separator(output->mode == CLINFO_HUMAN ? comma_str : vbar_str);
 
-	GET_VAL_ARRAY(ret, loc);
+	GET_VAL_ARRAY_TYPED(ret, cl_device_partition_property_ext*, loc);
 
 	szval = 0;
 	if (!ret->err) {
@@ -2065,7 +2033,7 @@ device_info_p2p_dev_list(struct device_info_ret *ret,
 	// and to have allocated the return array beforehand.
 	cl_device_id *val = NULL;
 	size_t numval = chk->p2p_num_devs, szval = numval*sizeof(*val);
-	_GET_VAL_VALUES(ret, loc);
+	_GET_VAL_VALUES_TYPED(ret, cl_device_id*, loc);
 	if (!ret->err) {
 		size_t cursor = 0;
 		szval = 0;
@@ -2088,7 +2056,7 @@ device_info_interop_list(struct device_info_ret *ret,
 {
 	cl_uint *val = NULL;
 	size_t szval = 0, numval = 0;
-	GET_VAL_ARRAY(ret, loc);
+	GET_VAL_ARRAY_TYPED(ret, cl_uint*, loc);
 	if (!ret->err) {
 		size_t cursor = 0;
 		const cl_interop_name *interop_name_end = cl_interop_names + num_known_interops;
@@ -2478,7 +2446,7 @@ printDeviceInfo(cl_device_id dev, const struct platform_list *plist, cl_uint p,
 			const char *msg = RET_BUF(ret)->buf;
 			size_t len = strlen(msg);
 			extensions_traits = traits;
-			ALLOC(extensions, len+1, "extensions");
+			ALLOC_TYPED(extensions, char*, len+1, "extensions");
 			memcpy(extensions, msg, len);
 			extensions[len] = '\0';
 		} else {
@@ -2603,7 +2571,7 @@ fetchOfflineDevicesAMD(const struct platform_list *plist, cl_uint p,
 	}
 
 	if (!ret->err) {
-		ALLOC(device, num_devs, "offline devices");
+		ALLOC_TYPED(device, cl_device_id*, num_devs, "offline devices");
 
 		ret->err = REPORT_ERROR(&ret->err_str,
 			clGetContextInfo(ctx, CL_CONTEXT_DEVICES,
@@ -2721,7 +2689,7 @@ void showDevices(const struct platform_list *plist, const struct opt_out *output
 
 	if (str.buf[0]) {
 		line_pfx_len = (int)(strlen(str.buf) + 1);
-		REALLOC(line_pfx, line_pfx_len, "line prefix");
+		REALLOC_TYPED(line_pfx, char*, line_pfx_len, "line prefix");
 		str.buf[0] = '\0'; /* reset */
 	}
 
@@ -2946,7 +2914,7 @@ void checkNullCtxFromType(const struct platform_list *plist, const struct opt_ou
 	reset_loc(&loc, __func__);
 	INIT_RET(ret, "null ctx from type");
 
-	ALLOC(devs, ndevs, "context devices");
+	ALLOC_TYPED(devs, cl_device_id*, ndevs, "context devices");
 
 	for (t = 1; t < devtype_count; ++t) { /* we skip 0 */
 		loc.sname = device_type_raw_str[t];
@@ -2978,7 +2946,7 @@ void checkNullCtxFromType(const struct platform_list *plist, const struct opt_ou
 			ret.err = clGetContextInfo(ctx, CL_CONTEXT_DEVICES, 0, NULL, &szval);
 			if (REPORT_ERROR_LOC(&ret, ret.err, &loc, "get %s size")) break;
 			if (szval > cursz) {
-				REALLOC(devs, szval, "context devices");
+				REALLOC_TYPED(devs, cl_device_id*, szval, "context devices");
 				cursz = szval;
 			}
 
@@ -3214,7 +3182,7 @@ struct icdl_data oclIcdProps(const struct platform_list *plist, const struct opt
 
 		if (output->mode == CLINFO_RAW) {
 			line_pfx_len = (int)(strlen(oclicdl_pfx) + 5);
-			REALLOC(line_pfx, line_pfx_len, "line prefix OCL ICD");
+			REALLOC_TYPED(line_pfx, char*, line_pfx_len, "line prefix OCL ICD");
 			strbuf_printf(&ret.str, "[%s/*]", oclicdl_pfx);
 			sprintf(line_pfx, "%*s", -line_pfx_len, ret.str.buf);
 		}
@@ -3260,112 +3228,4 @@ struct icdl_data oclIcdProps(const struct platform_list *plist, const struct opt
 		}
 	}
 	return icdl;
-}
-
-#if defined __GNUC__ && ((__GNUC__*10 + __GNUC_MINOR__) < 46)
-#pragma GCC diagnostic warning "-Wstrict-aliasing"
-#endif
-
-void version(void)
-{
-	puts("clinfo version 2.2.18.04.06");
-}
-
-void usage(void)
-{
-	version();
-	puts("Display properties of all available OpenCL platforms and devices");
-	puts("Usage: clinfo [options ...]\n");
-	puts("Options:");
-	puts("\t--all-props, -a\t\ttry all properties, only show valid ones");
-	puts("\t--always-all-props, -A\t\tshow all properties, even if invalid");
-	puts("\t--human\t\thuman-friendly output (default)");
-	puts("\t--raw\t\traw output");
-	puts("\t--offline\talso show offline devices");
-	puts("\t--list, -l\tonly list the platforms and devices by name");
-	puts("\t-h, -?\t\tshow usage");
-	puts("\t--version, -v\tshow version\n");
-	puts("Defaults to raw mode if invoked with");
-	puts("a name that contains the string \"raw\"");
-}
-
-int main(int argc, char *argv[])
-{
-	cl_uint p;
-	cl_int err;
-	int a = 0;
-
-	struct opt_out output;
-
-	struct platform_list plist;
-	init_plist(&plist);
-
-	output.mode = CLINFO_HUMAN;
-	output.cond = COND_PROP_CHECK;
-	output.brief = CL_FALSE;
-	output.offline = CL_FALSE;
-	output.check_size = CL_FALSE;
-
-	/* if there's a 'raw' in the program name, switch to raw output mode */
-	if (strstr(argv[0], "raw"))
-		output.mode = CLINFO_RAW;
-
-	/* process command-line arguments */
-	while (++a < argc) {
-		if (!strcmp(argv[a], "-a") || !strcmp(argv[a], "--all-props"))
-			output.cond = COND_PROP_TRY;
-		else if (!strcmp(argv[a], "-A") || !strcmp(argv[a], "--always-all-props"))
-			output.cond = COND_PROP_SHOW;
-		else if (!strcmp(argv[a], "--raw"))
-			output.mode = CLINFO_RAW;
-		else if (!strcmp(argv[a], "--human"))
-			output.mode = CLINFO_HUMAN;
-		else if (!strcmp(argv[a], "--offline"))
-			output.offline = CL_TRUE;
-		else if (!strcmp(argv[a], "-l") || !strcmp(argv[a], "--list"))
-			output.brief = CL_TRUE;
-		else if (!strcmp(argv[a], "-?") || !strcmp(argv[a], "-h")) {
-			usage();
-			return 0;
-		} else if (!strcmp(argv[a], "--version") || !strcmp(argv[a], "-v")) {
-			version();
-			return 0;
-		} else {
-			fprintf(stderr, "ignoring unknown command-line parameter %s\n", argv[a]);
-		}
-	}
-	output.detailed = !output.brief;
-
-	err = clGetPlatformIDs(0, NULL, &plist.num_platforms);
-	if (err != CL_PLATFORM_NOT_FOUND_KHR)
-		CHECK_ERROR(err, "number of platforms");
-
-	if (!output.brief)
-		printf(I0_STR "%" PRIu32 "\n",
-			(output.mode == CLINFO_HUMAN ?
-			 "Number of platforms" : "#PLATFORMS"),
-			plist.num_platforms);
-	if (!plist.num_platforms)
-		return 0;
-
-	alloc_plist(&plist);
-	err = clGetPlatformIDs(plist.num_platforms, plist.platform, NULL);
-	CHECK_ERROR(err, "platform IDs");
-
-	ALLOC(line_pfx, 1, "line prefix");
-
-	for (p = 0; p < plist.num_platforms; ++p) {
-		gatherPlatformInfo(&plist, p, &output);
-		if (output.detailed)
-			puts("");
-	}
-	showDevices(&plist, &output);
-	if (output.detailed) {
-		if (output.mode != CLINFO_RAW)
-			checkNullBehavior(&plist, &output);
-		oclIcdProps(&plist, &output);
-	}
-
-	free_plist(&plist);
-	return 0;
 }
